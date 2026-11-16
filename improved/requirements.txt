@@ -1,0 +1,5 @@
+tensorflow>=2.16
+opencv-python-headless
+numpy
+scikit-learn
+matplotlib

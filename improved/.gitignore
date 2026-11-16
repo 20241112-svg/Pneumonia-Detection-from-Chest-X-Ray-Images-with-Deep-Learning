@@ -1,0 +1,6 @@
+data/
+runs/
+results/
+*.keras
+*.h5
+degrade_grid.png
