@@ -10,7 +10,8 @@
 ## 원본 대비 변경점
 | 구분 | 내용 |
 |---|---|
-| 포팅 | Keras 2.2.4 / TF 1.12 노트북 → TF 2.x / Keras 3 스크립트 (`train_baseline.py`). 동일 구조·동일 증강·동일 손실로 베이스라인 재현. 고친 항목 15개는 `PORTING_NOTES.md` |
+| 포팅 | Keras 2.2.4 / TF 1.12 노트북 → TF 2.x / Keras 3 스크립트 (`train_baseline.py`). 동일 구조·동일 증강·동일 손실. 고친 항목은 `PORTING_NOTES.md` |
+| 학습 실패 수정 | 원본 CNN(BN 없는 Conv-ReLU 10층)은 TF2에서 **활성값 소실로 학습이 안 됨**(loss 0.693 고정, 전부 폐렴 예측, acc 0.625). 각 Conv 뒤 BatchNorm 만 추가한 `--bn` 을 수정 베이스라인으로 사용 (채널·커널·풀링·Dense 동일) |
 | 데이터 분할 | 원본의 재현 불가능한 320/320 분할 → Kaggle test 624장 고정 + train 10% 를 val 로 (`make_split.py`, seed 고정) |
 | 열화 벤치마크 | 노이즈·블러·대비·JPEG·모션블러 × 강도 5단계 (`degrade.py`). JPEG·모션블러는 **홀드아웃**(학습에 미사용) |
 | 개선 플래그 | `--clahe` 전처리, `--degrade-aug` 열화 증강, `--backbone efficientnetb0/resnet50` 전이학습 |
@@ -23,21 +24,22 @@ Colab: `colab_run.ipynb` 를 열어 순서대로 실행 (GPU 런타임).
 ```bash
 pip install -r requirements.txt
 python make_split.py --src data/raw/chest_xray --dst data/input --val-ratio 0.1 --seed 42
-python train_baseline.py --data data/input --tag base --seed 0            # 베이스라인
+python train_baseline.py --data data/input --tag base --seed 0 --bn       # 수정 베이스라인
 python eval_robustness.py --model runs/base_s0/best.keras --tag base_s0  # 열화 평가
-python train_baseline.py --data data/input --tag both --seed 0 --clahe --degrade-aug
+python train_baseline.py --data data/input --tag both --seed 0 --bn --clahe --degrade-aug
 python eval_robustness.py --model runs/both_s0/best.keras --tag both_s0
 python eval_robustness.py --compare results/base_s0.csv results/both_s0.csv --out results/compare.png
 ```
 
 ## 실험 매트릭스
-| tag | clahe | degrade-aug | backbone |
-|---|---|---|---|
-| base | – | – | 원본 CNN |
-| clahe | ○ | – | 원본 CNN |
-| aug | – | ○ | 원본 CNN |
-| both | ○ | ○ | 원본 CNN |
-| effb0_both | ○ | ○ | EfficientNet-B0 |
+| tag | bn | clahe | degrade-aug | backbone |
+|---|---|---|---|---|
+| base_orig | – | – | – | 원본 CNN (학습 실패 재현) |
+| base | ○ | – | – | 원본 CNN + BN |
+| clahe | ○ | ○ | – | 원본 CNN + BN |
+| aug | ○ | – | ○ | 원본 CNN + BN |
+| both | ○ | ○ | ○ | 원본 CNN + BN |
+| effb0_both | – | ○ | ○ | EfficientNet-B0 |
 
 핵심 비교는 seed 0/1/2 평균 ± 표준편차로 보고.
 

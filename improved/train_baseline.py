@@ -92,27 +92,34 @@ def make_dataset(split_dir, img_size, batch, training, clahe, degrade_aug, hflip
 # ---------------------------------------------------------------------------
 # 모델
 # ---------------------------------------------------------------------------
-def baseline_cnn(img_size):
-    """원본 get_conv_model() 을 channels_last 로 그대로 포팅."""
-    m = keras.Sequential(name="baseline_cnn")
+def baseline_cnn(img_size, bn=False, init="glorot_uniform"):
+    """
+    원본 get_conv_model() 을 channels_last 로 그대로 포팅.
+
+    bn=False : 원본과 동일 (Conv-ReLU ×10, BN 없음).
+               → TF2 재현에서 활성값이 층을 지날수록 소실(입력 std 0.13 → 마지막 conv 0.006)되어
+                 loss 가 ln2(0.693) 에서 전혀 내려가지 않고 전부 한 클래스로 예측함 (3 seed 재현).
+    bn=True  : 각 Conv 뒤에 BatchNormalization 만 추가 (채널 수·커널·풀링·Dense 전부 동일).
+               최소 수정으로 학습 가능하게 만든 "수정 베이스라인".
+    """
+    m = keras.Sequential(name="baseline_cnn" + ("_bn" if bn else ""))
     m.add(layers.Input((img_size, img_size, 3)))
-    m.add(layers.Conv2D(16, 3, activation="relu", padding="same"))
-    m.add(layers.Conv2D(16, 3, activation="relu", padding="same"))
-    m.add(layers.MaxPooling2D(2))
-    m.add(layers.Conv2D(32, 3, activation="relu", padding="same"))
-    m.add(layers.Conv2D(32, 3, activation="relu", padding="same"))
-    m.add(layers.MaxPooling2D(2))
-    m.add(layers.Conv2D(64, 3, activation="relu", padding="same"))
-    m.add(layers.Conv2D(64, 3, activation="relu", padding="same"))
-    m.add(layers.MaxPooling2D(2))
-    m.add(layers.Conv2D(96, 3, dilation_rate=2, activation="relu", padding="same"))
-    m.add(layers.Conv2D(96, 3, activation="relu", padding="valid"))
-    m.add(layers.MaxPooling2D(2))
-    m.add(layers.Conv2D(128, 3, dilation_rate=2, activation="relu", padding="same"))
-    m.add(layers.Conv2D(128, 3, activation="relu", padding="valid"))
-    m.add(layers.MaxPooling2D(2))
+
+    def conv(f, **kw):
+        if bn:
+            m.add(layers.Conv2D(f, 3, kernel_initializer=init, **kw))
+            m.add(layers.BatchNormalization())
+            m.add(layers.Activation("relu"))
+        else:
+            m.add(layers.Conv2D(f, 3, activation="relu", kernel_initializer=init, **kw))
+
+    conv(16, padding="same"); conv(16, padding="same"); m.add(layers.MaxPooling2D(2))
+    conv(32, padding="same"); conv(32, padding="same"); m.add(layers.MaxPooling2D(2))
+    conv(64, padding="same"); conv(64, padding="same"); m.add(layers.MaxPooling2D(2))
+    conv(96, dilation_rate=2, padding="same"); conv(96, padding="valid"); m.add(layers.MaxPooling2D(2))
+    conv(128, dilation_rate=2, padding="same"); conv(128, padding="valid"); m.add(layers.MaxPooling2D(2))
     m.add(layers.Flatten())
-    m.add(layers.Dense(64, activation="relu"))
+    m.add(layers.Dense(64, activation="relu", kernel_initializer=init))
     m.add(layers.Dropout(0.4))
     m.add(layers.Dense(2, activation="softmax"))
     return m
@@ -173,6 +180,8 @@ def main():
     ap.add_argument("--backbone", default=None, choices=[None, "efficientnetb0", "resnet50"])
     ap.add_argument("--weights", default="imagenet", help="backbone 가중치 (imagenet | none)")
     ap.add_argument("--no-class-weight", action="store_true")
+    ap.add_argument("--bn", action="store_true", help="베이스 CNN 각 Conv 뒤에 BatchNorm 추가 (원본은 BN 없음 → 학습 실패)")
+    ap.add_argument("--init", default="glorot_uniform", help="커널 초기화 (glorot_uniform=원본 | he_normal)")
     a = ap.parse_args()
 
     set_seed(a.seed)
@@ -189,7 +198,7 @@ def main():
     if a.backbone:
         model = backbone_model(a.backbone, a.img_size, None if a.weights == "none" else a.weights)
     else:
-        model = baseline_cnn(a.img_size)
+        model = baseline_cnn(a.img_size, bn=a.bn, init=a.init)
     model.summary(line_length=100)
 
     model.compile(optimizer=keras.optimizers.Adam(learning_rate=a.lr),

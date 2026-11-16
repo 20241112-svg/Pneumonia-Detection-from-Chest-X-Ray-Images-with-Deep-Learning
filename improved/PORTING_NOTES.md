@@ -61,6 +61,7 @@ Conv16-Conv16-Pool → Conv32-Conv32-Pool → Conv64-Conv64-Pool
 | 19 | `horizontal_flip=True` | X-ray는 좌우 비대칭(심장 위치)이라 플립 증강은 논란 있음. 베이스라인 재현 땐 유지, 개선판에선 끄는 것도 실험 항목 가능 |
 | 20 | `shuffle=True` 학습 generator + `seed` 미지정 | 시드 고정 안 됨 → 재현성 없음. `tf.random.set_seed`, `np.random.seed`, generator `seed=` 추가 |
 | 21 | README 지표 "Accuracy (F-1) Score 89.53%" | 정확도인지 F1인지 불명확. 우리 재현 결과를 기준값으로 삼고 README 수치는 참고만 |
+| 22 | **원본 CNN 구조 자체가 TF2에서 학습되지 않음** (2026-11-16 Colab T4 실측) | loss 가 ln2=0.693 에서 12 epoch 내내 고정, 테스트 전부 PNEUMONIA 예측(acc 0.625 = 폐렴 비율, AUC 0.5). 원인: Conv-ReLU 10층에 BN 이 없어 활성값이 층을 지날수록 소실(초기화 직후 입력 std 0.13 → 마지막 conv std 0.006 → 로짓 차이 0.003). lr 1e-4, He 초기화로도 복구 안 됨. **각 Conv 뒤 BatchNorm 추가(`--bn`)로 해결** — 채널·커널·풀링·Dense 는 원본과 동일 |
 
 ---
 
@@ -88,14 +89,16 @@ python make_split.py --src data/raw/chest_xray --dst data/input --val-ratio 0.1 
 
 ### 실험 매트릭스 (2주차)
 ```
-# 베이스라인 (3 seeds)
-python train_baseline.py --seed 0 --tag base
+# 원본 그대로 (학습 실패 재현용, 보고서에 "원본은 재현 불가" 근거로 1~2 seed 만)
+python train_baseline.py --seed 0 --tag base_orig
+# 수정 베이스라인 = 원본 + BN (이후 모든 개선 실험의 기준)
+python train_baseline.py --seed 0 --tag base --bn
 # 전처리만
-python train_baseline.py --seed 0 --clahe --tag clahe
+python train_baseline.py --seed 0 --bn --clahe --tag clahe
 # 증강만 (홀드아웃 열화 제외)
-python train_baseline.py --seed 0 --degrade-aug --tag aug
+python train_baseline.py --seed 0 --bn --degrade-aug --tag aug
 # 둘 다
-python train_baseline.py --seed 0 --clahe --degrade-aug --tag both
+python train_baseline.py --seed 0 --bn --clahe --degrade-aug --tag both
 # (선택) 백본 교체
 python train_baseline.py --seed 0 --backbone efficientnetb0 --clahe --degrade-aug --tag effb0_both
 
