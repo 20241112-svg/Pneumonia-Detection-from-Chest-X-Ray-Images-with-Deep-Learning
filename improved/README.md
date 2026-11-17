@@ -15,6 +15,7 @@
 | 데이터 분할 | 원본의 재현 불가능한 320/320 분할 → Kaggle test 624장 고정 + train 10% 를 val 로 (`make_split.py`, seed 고정) |
 | 열화 벤치마크 | 노이즈·블러·대비·JPEG·모션블러 × 강도 5단계 (`degrade.py`). JPEG·모션블러는 **홀드아웃**(학습에 미사용) |
 | 개선 플래그 | `--clahe` 전처리, `--degrade-aug` 열화 증강, `--backbone efficientnetb0/resnet50` 전이학습 |
+| 구조 변경 (LoRA ViT) | `train_lora_vit.py` — ImageNet 사전학습 ViT-S/16 을 고정하고 **LoRA 어댑터(약 60만 파라미터, 2.7%)** 만 학습. `--mode head`(linear probe) / `full`(전체 미세조정) 비교군 포함. 같은 분할·열화·CSV 형식 사용 |
 | 평가 | 깨끗한 test + 25개 열화 조건에서 accuracy/F1/AUC/클래스별 recall → CSV + 곡선 (`eval_robustness.py`) |
 
 ## 실행
@@ -29,6 +30,11 @@ python eval_robustness.py --model runs/base_s0/best.keras --tag base_s0  # 열�
 python train_baseline.py --data data/input --tag both --seed 0 --bn --clahe --degrade-aug
 python eval_robustness.py --model runs/both_s0/best.keras --tag both_s0
 python eval_robustness.py --compare results/base_s0.csv results/both_s0.csv --out results/compare.png
+
+# 구조 변경: 사전학습 ViT + LoRA (학습·열화 평가 한 번에, 결과는 같은 results/ 형식)
+python train_lora_vit.py --data data/input --tag vit_lora --seed 0 --mode lora
+python train_lora_vit.py --data data/input --tag vit_lora_both --seed 0 --mode lora --clahe --degrade-aug
+python eval_robustness.py --compare results/base_s0.csv results/both_s0.csv results/vit_lora_s0.csv results/vit_lora_both_s0.csv --out results/compare_vit.png
 ```
 
 ## 실험 매트릭스
@@ -40,6 +46,9 @@ python eval_robustness.py --compare results/base_s0.csv results/both_s0.csv --ou
 | aug | ○ | – | ○ | 원본 CNN + BN |
 | both | ○ | ○ | ○ | 원본 CNN + BN |
 | effb0_both | – | ○ | ○ | EfficientNet-B0 |
+| vit_lora | – | – | – | ViT-S/16 + LoRA (train_lora_vit.py) |
+| vit_lora_both | – | ○ | ○ | ViT-S/16 + LoRA |
+| vit_head / vit_full | – | – | – | ViT-S/16 linear probe / 전체 미세조정 (비교군) |
 
 핵심 비교는 seed 0/1/2 평균 ± 표준편차로 보고.
 

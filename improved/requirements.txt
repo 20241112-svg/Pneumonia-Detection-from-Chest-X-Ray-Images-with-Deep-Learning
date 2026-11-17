@@ -3,3 +3,6 @@ opencv-python-headless
 numpy
 scikit-learn
 matplotlib
+torch
+timm
+peft
