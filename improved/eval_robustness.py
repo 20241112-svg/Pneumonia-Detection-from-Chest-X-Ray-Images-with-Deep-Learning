@@ -72,26 +72,36 @@ def run_eval(a):
     paths, y = list_files(os.path.join(a.data, "test"))
     base = load_gray(paths, img_size)
     print(f"test {len(y)}장 로드")
+    # val 도 같은 조건으로 평가 → analyze_threshold.py 가 val 에서 임계값을 고르고 test 에 적용
+    vpaths, vy = list_files(os.path.join(a.data, "val"))
+    vbase = load_gray(vpaths, img_size) if (len(vy) and not a.no_val) else None
 
-    rows = []
-    def record(name, s, prob):
+    rows, probs = [], {"y_test": y, "y_val": vy}
+    def record(name, s, prob, vprob=None):
         m = metrics(y, prob); m.update({"corruption": name, "severity": s,
                                         "holdout": name in HOLDOUT_CORRUPTIONS})
         rows.append(m)
+        key = f"{name}_s{s}"
+        probs[f"test_{key}"] = prob.astype(np.float32)
+        if vprob is not None:
+            probs[f"val_{key}"] = vprob.astype(np.float32)
         print(f"{name:<16} s={s}  acc={m['accuracy']:.4f}  f1={m['f1']:.4f}  auc={m['auc']:.4f}  "
               f"rN={m['recall_normal']:.3f} rP={m['recall_pneumonia']:.3f}")
 
-    prob = model.predict(to_batch(base, clahe), batch_size=a.batch, verbose=0)[:, 1]
-    record("clean", 0, prob)
+    def run(imgs):
+        return model.predict(to_batch(imgs, clahe), batch_size=a.batch, verbose=0)[:, 1]
+
+    record("clean", 0, run(base), run(vbase) if vbase is not None else None)
 
     for name in CORRUPTIONS:
         for s in SEVERITIES:
             np.random.seed(a.seed + s)   # 노이즈/모션 각도 재현성
             deg = np.stack([degrade(g, name, s) for g in base])
-            prob = model.predict(to_batch(deg, clahe), batch_size=a.batch, verbose=0)[:, 1]
-            record(name, s, prob)
+            vdeg = np.stack([degrade(g, name, s) for g in vbase]) if vbase is not None else None
+            record(name, s, run(deg), run(vdeg) if vdeg is not None else None)
 
     os.makedirs(a.out_dir, exist_ok=True)
+    np.savez_compressed(os.path.join(a.out_dir, f"{a.tag}_probs.npz"), **probs)
     csv_path = os.path.join(a.out_dir, f"{a.tag}.csv")
     with open(csv_path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["corruption", "severity", "holdout", "accuracy", "f1", "auc",
@@ -162,6 +172,7 @@ if __name__ == "__main__":
     ap.add_argument("--batch", type=int, default=64)
     ap.add_argument("--clahe", action="store_true")
     ap.add_argument("--ignore-config", action="store_true")
+    ap.add_argument("--no-val", action="store_true", help="val 평가 생략 (임계값 분석 불가)")
     ap.add_argument("--seed", type=int, default=123)
     ap.add_argument("--compare", nargs="+", help="비교할 결과 CSV 들")
     ap.add_argument("--out", default="results/compare.png")
