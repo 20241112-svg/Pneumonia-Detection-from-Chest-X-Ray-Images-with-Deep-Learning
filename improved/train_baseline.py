@@ -56,15 +56,24 @@ def _affine_aug(img, rng, shear=0.2, zoom=0.2, hflip=True):
     return np.ascontiguousarray(img)
 
 
-def make_loader(img_size, training, clahe, degrade_aug, hflip, seed):
-    rng = np.random.default_rng(seed)
+# 에포크 카운터: 증강 난수를 (seed, 샘플 인덱스, 에포크) 로 결정하기 위해 콜백이 갱신
+EPOCH = {"n": 0}
 
-    def _load(path, label):
+
+class EpochCounter(keras.callbacks.Callback):
+    def on_epoch_begin(self, epoch, logs=None):
+        EPOCH["n"] = epoch
+
+
+def make_loader(img_size, training, clahe, degrade_aug, hflip, seed):
+    def _load(path, label, idx):
         p = path.decode() if isinstance(path, bytes) else str(path)
+        # 재현성: 병렬 스레드가 난수 생성기를 공유하지 않도록 샘플마다 독립 시드
+        rng = np.random.default_rng([int(seed), int(idx), int(EPOCH["n"])])
         img = cv2.imread(p, cv2.IMREAD_GRAYSCALE)
         img = cv2.resize(img, (img_size, img_size), interpolation=cv2.INTER_AREA)
         if training and degrade_aug:
-            img = random_train_degrade(img, p=0.5, max_severity=3, rng=rng)
+            img = random_train_degrade(img, rng=rng)
         if clahe:
             img = apply_clahe(img)
         if training:
@@ -72,20 +81,21 @@ def make_loader(img_size, training, clahe, degrade_aug, hflip, seed):
         img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB).astype(np.float32) / 255.0
         return img, np.int32(label)
 
-    def tf_load(path, label):
-        img, lab = tf.numpy_function(_load, [path, label], [tf.float32, tf.int32])
+    def tf_load(path, label, idx):
+        img, lab = tf.numpy_function(_load, [path, label, idx], [tf.float32, tf.int32])
         img.set_shape((img_size, img_size, 3)); lab.set_shape(())
         return img, tf.one_hot(lab, 2)
     return tf_load
 
 
-def make_dataset(split_dir, img_size, batch, training, clahe, degrade_aug, hflip, seed):
+def make_dataset(split_dir, img_size, batch, training, clahe, degrade_aug, hflip, seed, shuffle=None):
     paths, labels = list_files(split_dir)
-    ds = tf.data.Dataset.from_tensor_slices((paths, labels))
-    if training:
+    idx = np.arange(len(paths), dtype=np.int64)
+    ds = tf.data.Dataset.from_tensor_slices((paths, labels, idx))
+    if training if shuffle is None else shuffle:
         ds = ds.shuffle(len(paths), seed=seed, reshuffle_each_iteration=True)
     ds = ds.map(make_loader(img_size, training, clahe, degrade_aug, hflip, seed),
-                num_parallel_calls=tf.data.AUTOTUNE)
+                num_parallel_calls=tf.data.AUTOTUNE, deterministic=True)
     return ds.batch(batch).prefetch(tf.data.AUTOTUNE), labels
 
 
@@ -142,9 +152,43 @@ def backbone_model(name, img_size, weights="imagenet"):
 
 
 # ---------------------------------------------------------------------------
-def set_seed(s):
+def set_seed(s, deterministic=True):
     random.seed(s); np.random.seed(s); tf.random.set_seed(s)
     os.environ["PYTHONHASHSEED"] = str(s)
+    if deterministic:
+        # GPU 커널의 비결정적 누적 연산까지 고정 (속도 약간 느려짐). 같은 seed → 같은 결과
+        os.environ["TF_DETERMINISTIC_OPS"] = "1"
+        try:
+            tf.config.experimental.enable_op_determinism()
+        except Exception as e:  # 일부 환경에서 미지원
+            print("op determinism 미적용:", e)
+
+
+def recalibrate_bn(model, clean_train_ds, max_batches=60):
+    """
+    BatchNorm running mean/var 를 '깨끗한' 학습 영상으로 다시 계산한다 (가중치는 불변).
+    열화 증강으로 학습하면 BN 통계가 열화 영상이 섞인 분포로 잡혀 깨끗한 입력과 어긋나는데
+    (aug 단독 모델: 깨끗한 정확도 79.5%, NORMAL 재현율 0.47), 이 단계가 그 편향을 제거한다.
+    momentum 을 (k-1)/k 로 바꿔가며 호출하면 running 값 = 배치 통계의 정확한 누적 평균.
+    """
+    bns = [l for l in model.layers if isinstance(l, layers.BatchNormalization)]
+    if not bns:
+        return 0
+    saved = [(l.momentum) for l in bns]
+    for l in bns:
+        l.moving_mean.assign(tf.zeros_like(l.moving_mean))
+        l.moving_variance.assign(tf.ones_like(l.moving_variance))
+    k = 0
+    for x, _ in clean_train_ds:
+        k += 1
+        for l in bns:
+            l.momentum = (k - 1) / k
+        model(x, training=True)
+        if k >= max_batches:
+            break
+    for l, m in zip(bns, saved):
+        l.momentum = m
+    return k
 
 
 def evaluate(model, ds, y_true):
@@ -182,9 +226,11 @@ def main():
     ap.add_argument("--no-class-weight", action="store_true")
     ap.add_argument("--bn", action="store_true", help="베이스 CNN 각 Conv 뒤에 BatchNorm 추가 (원본은 BN 없음 → 학습 실패)")
     ap.add_argument("--init", default="glorot_uniform", help="커널 초기화 (glorot_uniform=원본 | he_normal)")
+    ap.add_argument("--no-bn-recal", action="store_true", help="학습 후 BN 통계 재보정 끄기 (기본: 켜짐)")
+    ap.add_argument("--no-deterministic", action="store_true", help="TF op determinism 끄기")
     a = ap.parse_args()
 
-    set_seed(a.seed)
+    set_seed(a.seed, deterministic=not a.no_deterministic)
     run_dir = os.path.join(a.out, f"{a.tag}_s{a.seed}")
     os.makedirs(run_dir, exist_ok=True)
     json.dump(vars(a), open(os.path.join(run_dir, "config.json"), "w"), indent=2)
@@ -217,6 +263,7 @@ def main():
         keras.callbacks.EarlyStopping(monitor="val_loss", patience=a.patience, restore_best_weights=True, verbose=1),
         keras.callbacks.ReduceLROnPlateau(monitor="val_loss", patience=3, factor=0.5, min_lr=1e-7, verbose=1),
         keras.callbacks.CSVLogger(os.path.join(run_dir, "log.csv")),
+        EpochCounter(),
     ]
 
     t0 = time.time()
@@ -226,15 +273,29 @@ def main():
               open(os.path.join(run_dir, "history.json"), "w"), indent=1)
 
     model = keras.models.load_model(best_path)
+    res_norecal = evaluate(model, test_ds, yte)
+    n_recal = 0
+    if not a.no_bn_recal and (a.bn or a.backbone):
+        # 재보정용: 깨끗한 train (증강 없음, CLAHE 는 추론과 동일하게 적용), 큰 배치
+        clean_tr, _ = make_dataset(os.path.join(a.data, "train"), a.img_size, 64, False, a.clahe, False, hflip, a.seed, shuffle=True)
+        n_recal = recalibrate_bn(model, clean_tr)
+        os.replace(best_path, os.path.join(run_dir, "best_norecal.keras"))  # 재보정 전 모델 보관
+        model.save(best_path)   # best.keras = 재보정된 모델 (eval_robustness 가 쓰는 파일)
     res = evaluate(model, test_ds, yte)
     res.update({"val_best_loss": float(min(hist.history["val_loss"])),
-                "epochs_run": len(hist.history["loss"]), "train_time_sec": train_time})
+                "epochs_run": len(hist.history["loss"]), "train_time_sec": train_time,
+                "bn_recal_batches": n_recal,
+                "clean_acc_before_bn_recal": res_norecal["accuracy"],
+                "recall_normal_before_bn_recal": res_norecal["recall_normal"]})
     json.dump(res, open(os.path.join(run_dir, "test_metrics.json"), "w"), indent=2)
 
     print("\n=== TEST (clean) ===")
     for k in ["accuracy", "precision", "recall", "f1", "auc", "recall_normal", "recall_pneumonia"]:
         print(f"{k:<18}{res[k]:.4f}")
     print("confusion_matrix [[TN FP][FN TP]] =", res["confusion_matrix"])
+    if n_recal:
+        print(f"BN 재보정 전 → 후: acc {res_norecal['accuracy']:.4f} → {res['accuracy']:.4f}, "
+              f"recall_normal {res_norecal['recall_normal']:.3f} → {res['recall_normal']:.3f}  ({n_recal} batches)")
     print("saved →", run_dir)
 
 

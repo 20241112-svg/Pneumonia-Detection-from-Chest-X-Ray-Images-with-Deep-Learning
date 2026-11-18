@@ -68,16 +68,16 @@ class XrayDS(Dataset):
     def __init__(self, split_dir, img_size, training, clahe, degrade_aug, hflip, seed):
         self.paths, self.labels = list_files(split_dir)
         self.img_size, self.training, self.clahe, self.degrade_aug, self.hflip = img_size, training, clahe, degrade_aug, hflip
-        self.seed = seed
+        self.seed, self.epoch = seed, 0
 
     def __len__(self): return len(self.paths)
 
     def __getitem__(self, i):
-        rng = np.random.default_rng(self.seed * 1_000_003 + i * 7919 + int(time.time() * 1e3) % 1000 if self.training else 0)
+        rng = np.random.default_rng([self.seed, i, self.epoch]) if self.training else np.random.default_rng(0)
         img = cv2.imread(self.paths[i], cv2.IMREAD_GRAYSCALE)
         img = cv2.resize(img, (self.img_size, self.img_size), interpolation=cv2.INTER_AREA)
         if self.training and self.degrade_aug:
-            img = random_train_degrade(img, p=0.5, max_severity=3, rng=rng)
+            img = random_train_degrade(img, rng=rng)
         if self.clahe:
             img = apply_clahe(img)
         if self.training:
@@ -182,6 +182,7 @@ def main():
     best, best_ep, bad, hist = float("inf"), -1, 0, []
     t0 = time.time()
     for ep in range(a.epochs):
+        tr.epoch = ep                      # 샘플별 증강 시드 = (seed, index, epoch)
         model.train(); tl, tc, tn = 0.0, 0, 0
         for x, y in tr_dl:
             x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
@@ -215,19 +216,27 @@ def main():
 
     # ---- 테스트: 깨끗한 + 열화 25조건 (eval_robustness.py 와 동일한 CSV 형식) ----
     te_paths, te_y = list_files(os.path.join(a.data, "test"))
-    base = [cv2.resize(cv2.imread(p, cv2.IMREAD_GRAYSCALE), (a.img_size, a.img_size), interpolation=cv2.INTER_AREA) for p in te_paths]
-    rows = []
-    def record(name, s, prob):
+    load = lambda ps: [cv2.resize(cv2.imread(p, cv2.IMREAD_GRAYSCALE), (a.img_size, a.img_size), interpolation=cv2.INTER_AREA) for p in ps]
+    base = load(te_paths)
+    va_paths, va_y = list_files(os.path.join(a.data, "val"))
+    vbase = load(va_paths)                     # analyze_threshold.py 용 val 확률도 저장
+    rows, probs = [], {"y_test": te_y, "y_val": va_y}
+    def record(name, s, prob, vprob):
         m = metrics(te_y, prob); m.update({"corruption": name, "severity": s, "holdout": name in HOLDOUT_CORRUPTIONS}); rows.append(m)
+        probs[f"test_{name}_s{s}"] = prob.astype(np.float32); probs[f"val_{name}_s{s}"] = vprob.astype(np.float32)
         print(f"{name:<16} s={s}  acc={m['accuracy']:.4f}  f1={m['f1']:.4f}  auc={m['auc']:.4f}  rN={m['recall_normal']:.3f} rP={m['recall_pneumonia']:.3f}")
         return m
-    clean = record("clean", 0, predict_probs(model, base, a.clahe, a.batch * 2, device))
+    P = lambda imgs: predict_probs(model, imgs, a.clahe, a.batch * 2, device)
+    clean = record("clean", 0, P(base), P(vbase))
     for name in CORRUPTIONS:
         for s in SEVERITIES:
             np.random.seed(123 + s)
-            record(name, s, predict_probs(model, [degrade(g, name, s) for g in base], a.clahe, a.batch * 2, device))
+            dte = [degrade(g, name, s) for g in base]
+            dva = [degrade(g, name, s) for g in vbase]
+            record(name, s, P(dte), P(dva))
 
     tag = f"{a.tag}_s{a.seed}"
+    np.savez_compressed(os.path.join(a.results, f"{tag}_probs.npz"), **probs)
     with open(os.path.join(a.results, f"{tag}.csv"), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["corruption", "severity", "holdout", "accuracy", "f1", "auc", "recall_normal", "recall_pneumonia"], extrasaction="ignore")
         w.writeheader(); w.writerows(rows)
