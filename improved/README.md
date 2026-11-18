@@ -37,6 +37,15 @@ python train_lora_vit.py --data data/input --tag vit_lora_both --seed 0 --mode l
 python eval_robustness.py --compare results/base_s0.csv results/both_s0.csv results/vit_lora_s0.csv results/vit_lora_both_s0.csv --out results/compare_vit.png
 ```
 
+## v2 변경 (2026-11-18, 1차 실험 결과 기반)
+| 변경 | 근거 (1차 결과) |
+|---|---|
+| **재현성**: 샘플별 증강 시드 (seed, index, epoch) + TF op determinism | 같은 seed 0 의 base 두 실행이 noise s2 에서 82% vs 67% 로 달랐음. 시드 반복 보고가 성립하려면 필수 |
+| **BN 통계 재보정** (학습 후 깨끗한 train 으로 running mean/var 재계산) | aug 단독 모델: 깨끗한 정확도 79.5%, AUC 는 0.954 로 거의 유지, NORMAL 재현율 0.47 → 순위는 멀쩡하고 결정 경계만 밀림 = 열화 영상이 섞인 BN 통계 |
+| **증강 v2**: 강도 1~4, 2종 합성 (AugMix 류 다양성) | both 가 블러 s4 에서 base 보다 낮고(0.71 vs 0.75) 홀드아웃 열화에 개선 없음 → 학습 최대 강도 부족 + 단일 열화 암기 |
+| **임계값 분석** (`analyze_threshold.py`) | 붕괴 조건에서도 AUC 0.85~0.95 → 임계값 재조정만으로 얼마나 회복되는지 분리 측정 |
+| **데이터 통계** (`data_stats.py`) | 열화 강도 값의 근거: 데이터셋 내 노이즈·대비·선명도 분포 위에 강도 1~5 위치 표시 |
+
 ## 실험 매트릭스
 | tag | bn | clahe | degrade-aug | backbone |
 |---|---|---|---|---|
@@ -49,6 +58,8 @@ python eval_robustness.py --compare results/base_s0.csv results/both_s0.csv resu
 | vit_lora | – | – | – | ViT-S/16 + LoRA (train_lora_vit.py) |
 | vit_lora_both | – | ○ | ○ | ViT-S/16 + LoRA |
 | vit_head / vit_full | – | – | – | ViT-S/16 linear probe / 전체 미세조정 (비교군) |
+
+핵심 비교(base / both / vit_lora_both)는 seed 0·1·2 평균 ± 표준편차로 보고. 1차(v1) 결과는 `results_v1/` 에 보관.
 
 핵심 비교는 seed 0/1/2 평균 ± 표준편차로 보고.
 
