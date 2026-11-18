@@ -34,14 +34,19 @@ def _to_uint8(x):
     return np.clip(np.rint(x), 0, 255).astype(np.uint8)
 
 
-def gaussian_noise(img, s):
+def _rng(rng):
+    # rng 미지정 시 전역 np.random 상태에서 파생 → np.random.seed() 로 평가 재현 가능
+    return rng if rng is not None else np.random.default_rng(np.random.randint(2**31 - 1))
+
+
+def gaussian_noise(img, s, rng=None):
     """저선량 촬영 시 양자 노이즈 근사."""
-    rng = np.random.default_rng()
+    rng = _rng(rng)
     noise = rng.normal(0.0, _NOISE_SIGMA[s], size=img.shape)
     return _to_uint8(_to_float(img) + noise)
 
 
-def gaussian_blur(img, s):
+def gaussian_blur(img, s, rng=None):
     """초점/미세 움직임에 의한 흐림."""
     sigma = _BLUR_SIGMA[s]
     if sigma <= 0:
@@ -50,7 +55,7 @@ def gaussian_blur(img, s):
     return cv2.GaussianBlur(img, (k, k), sigmaX=sigma, sigmaY=sigma)
 
 
-def contrast(img, s):
+def contrast(img, s, rng=None):
     """대비 저하 + 감마로 노출 차이 흉내 (장비·설정 편차)."""
     x = _to_float(img) / 255.0
     mean = x.mean()
@@ -59,7 +64,7 @@ def contrast(img, s):
     return _to_uint8(x * 255.0)
 
 
-def jpeg(img, s):
+def jpeg(img, s, rng=None):
     """전송/저장 압축 아티팩트. (홀드아웃)"""
     q = _JPEG_Q[s]
     if q >= 100:
@@ -73,14 +78,14 @@ def jpeg(img, s):
     return out
 
 
-def motion_blur(img, s):
+def motion_blur(img, s, rng=None):
     """방향성 모션 블러 (호흡/움직임). (홀드아웃)"""
     k = _MOTION_K[s]
     if k <= 1:
         return img.copy()
     kernel = np.zeros((k, k), dtype=np.float32)
     kernel[k // 2, :] = 1.0                          # 가로 방향
-    angle = np.random.default_rng().uniform(-30, 30) # 약간 랜덤 각도
+    angle = _rng(rng).uniform(-30, 30)               # 약간 랜덤 각도
     M = cv2.getRotationMatrix2D((k / 2 - 0.5, k / 2 - 0.5), angle, 1.0)
     kernel = cv2.warpAffine(kernel, M, (k, k))
     kernel /= kernel.sum() + 1e-8
@@ -106,28 +111,43 @@ assert set(TRAIN_CORRUPTIONS) | set(HOLDOUT_CORRUPTIONS) == set(CORRUPTIONS)
 assert not set(TRAIN_CORRUPTIONS) & set(HOLDOUT_CORRUPTIONS)
 
 
-def degrade(img, name, severity):
-    """단일 열화 적용. severity 0 → 원본 복사."""
+def degrade(img, name, severity, rng=None):
+    """단일 열화 적용. severity 0 → 원본 복사. rng 를 주면 노이즈·모션 각도가 결정적."""
     if severity == 0:
         return img.copy()
     if name not in CORRUPTIONS:
         raise KeyError(f"unknown corruption: {name}")
     if not 1 <= severity <= 5:
         raise ValueError("severity must be 0..5")
-    return CORRUPTIONS[name](img, severity)
+    return CORRUPTIONS[name](img, severity, rng=rng)
 
 
-def random_train_degrade(img, p=0.5, max_severity=3, rng=None):
+_SEV_WEIGHTS = np.array([0.35, 0.30, 0.20, 0.15])   # severity 1,2,3,4 샘플링 비율
+
+
+def random_train_degrade(img, p=0.5, max_severity=4, p_compose=0.5, rng=None):
     """
-    학습 증강용: 확률 p로 TRAIN_CORRUPTIONS 중 하나를 severity 1~max_severity 로 적용.
-    HOLDOUT 열화는 절대 사용하지 않음.
+    학습 증강용. 확률 p 로 TRAIN_CORRUPTIONS 열화를 적용. HOLDOUT 열화는 절대 사용하지 않음.
+
+    v2 (2026-11-18) — 1차 실험 결과에 따른 변경:
+      - 강도 1~3 → 1~4 (가중치 .35/.30/.20/.15). 1차에서 블러 강도 4~5 는 증강 모델도 개선이 없었음
+        (both: blur s4 0.71 vs base 0.75) → 학습 때 본 최대 강도가 평가 강도보다 낮았던 것이 원인.
+      - 확률 p_compose 로 서로 다른 열화 2종을 순차 합성. 단일 열화만 학습하면 "그 열화 패턴" 을 외우고
+        홀드아웃 열화로 일반화되지 않음 (both: motion_blur·jpeg 가 base 이하). 열화를 섞어 다양성을 높이면
+        보지 않은 열화에 대한 강건성이 오른다는 것이 AugMix (Hendrycks et al., ICLR 2020) 의 핵심 결과.
     """
     rng = rng or np.random.default_rng()
     if rng.random() >= p:
         return img
-    name = TRAIN_CORRUPTIONS[rng.integers(len(TRAIN_CORRUPTIONS))]
-    s = int(rng.integers(1, max_severity + 1))
-    return degrade(img, name, s)
+    k = 2 if rng.random() < p_compose else 1
+    names = rng.choice(TRAIN_CORRUPTIONS, size=k, replace=False)
+    w = _SEV_WEIGHTS[:max_severity] / _SEV_WEIGHTS[:max_severity].sum()
+    for i, name in enumerate(names):
+        s = int(rng.choice(np.arange(1, max_severity + 1), p=w))
+        if k == 2:
+            s = max(1, s - 1)       # 합성 시에는 각 열화를 한 단계 약하게 (과도한 파괴 방지)
+        img = degrade(img, str(name), s, rng=rng)
+    return img
 
 
 def apply_clahe(img, clip=2.0, tile=8):
