@@ -29,8 +29,11 @@ THRS = np.linspace(0.02, 0.98, 97)
 
 
 def best_thr(y, p):
-    scores = [balanced_accuracy_score(y, p >= t) for t in THRS]
-    return float(THRS[int(np.argmax(scores))])
+    # 후보 = 고정 격자 + 예측 확률 자체의 분위수.
+    # 열화가 심하면 확률이 0.98 이상에 몰리므로(noise s4: NORMAL 평균 0.98) 고정 격자만으로는 상한에 걸린다.
+    cand = np.unique(np.concatenate([THRS, np.quantile(p, np.linspace(0.005, 0.995, 199))]))
+    scores = [balanced_accuracy_score(y, p >= t) for t in cand]
+    return float(cand[int(np.argmax(scores))])
 
 
 def analyze(npz_path):
@@ -103,6 +106,8 @@ if __name__ == "__main__":
 
     all_rows, npzs = {}, {}
     for p in a.probs:
+        if not os.path.exists(p):
+            print(f"[건너뜀] {p} 없음 — eval_robustness.py 를 먼저 실행해야 함"); continue
         tag = os.path.basename(p).replace("_probs.npz", "")
         rows, d, y = analyze(p)
         all_rows[tag], npzs[tag] = rows, d
@@ -116,7 +121,9 @@ if __name__ == "__main__":
             print(f"{lab:<22}{m(rs,'acc_05'):>9.4f}{m(rs,'acc_valthr'):>13.4f}{m(rs,'acc_oracle'):>12.4f}{m(rs,'auc'):>8.4f}")
         worst = min(rows, key=lambda r: r["acc_05"])
         print(f"최악 조건 {worst['corruption']} s{worst['severity']}: acc@0.5 {worst['acc_05']:.3f} → "
-              f"val-thr {worst.get('acc_valthr', float('nan')):.3f} (thr {worst.get('thr_val', float('nan')):.2f}), "
+              f"val-thr {worst.get('acc_valthr', float('nan')):.3f} (thr {worst.get('thr_val', float('nan')):.4f}), "
               f"oracle {worst['acc_oracle']:.3f} | NORMAL 평균 P(pneu) {worst['mean_prob_normal']:.2f} (clean {rows[0]['mean_prob_normal']:.2f})")
+    if not all_rows:
+        raise SystemExit("분석할 파일이 없습니다.")
     plot(all_rows, npzs, os.path.join(a.out_dir, f"threshold_{a.tag}.png"))
     print("saved →", os.path.join(a.out_dir, f"threshold_{a.tag}.png"))
