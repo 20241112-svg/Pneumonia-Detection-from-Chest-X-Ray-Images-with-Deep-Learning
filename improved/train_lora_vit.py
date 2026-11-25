@@ -69,13 +69,16 @@ class XrayDS(Dataset):
         self.paths, self.labels = list_files(split_dir)
         self.img_size, self.training, self.clahe, self.degrade_aug, self.hflip = img_size, training, clahe, degrade_aug, hflip
         self.seed, self.epoch = seed, 0
+        # 한 번만 디코딩·리사이즈해서 메모리에 보관 (4,709장 @224px ≈ 236MB). 결과는 동일, 에포크 시간 단축
+        self.imgs = np.empty((len(self.paths), img_size, img_size), dtype=np.uint8)
+        for i, p in enumerate(self.paths):
+            self.imgs[i] = cv2.resize(cv2.imread(p, cv2.IMREAD_GRAYSCALE), (img_size, img_size), interpolation=cv2.INTER_AREA)
 
     def __len__(self): return len(self.paths)
 
     def __getitem__(self, i):
         rng = np.random.default_rng([self.seed, i, self.epoch]) if self.training else np.random.default_rng(0)
-        img = cv2.imread(self.paths[i], cv2.IMREAD_GRAYSCALE)
-        img = cv2.resize(img, (self.img_size, self.img_size), interpolation=cv2.INTER_AREA)
+        img = self.imgs[i]
         if self.training and self.degrade_aug:
             img = random_train_degrade(img, rng=rng)
         if self.clahe:

@@ -65,13 +65,32 @@ class EpochCounter(keras.callbacks.Callback):
         EPOCH["n"] = epoch
 
 
-def make_loader(img_size, training, clahe, degrade_aug, hflip, seed):
-    def _load(path, label, idx):
-        p = path.decode() if isinstance(path, bytes) else str(path)
+_CACHE = {}
+
+
+def load_split_cached(split_dir, img_size):
+    """
+    split 전체를 img_size 로 줄인 grayscale uint8 배열로 한 번만 읽어 메모리에 둔다 (train 4,709장 @150px ≈ 106MB).
+    원본 JPEG(1~2MP) 를 매 에포크 다시 디코딩하던 것이 학습 시간의 대부분이었음. 결과는 동일(같은 resize).
+    """
+    key = (os.path.abspath(split_dir), int(img_size))
+    if key not in _CACHE:
+        paths, labels = list_files(split_dir)
+        arr = np.empty((len(paths), img_size, img_size), dtype=np.uint8)
+        for i, p in enumerate(paths):
+            g = cv2.imread(p, cv2.IMREAD_GRAYSCALE)
+            if g is None:
+                raise IOError(f"이미지를 읽을 수 없음: {p}")
+            arr[i] = cv2.resize(g, (img_size, img_size), interpolation=cv2.INTER_AREA)
+        _CACHE[key] = (arr, labels)
+    return _CACHE[key]
+
+
+def make_loader(arr, img_size, training, clahe, degrade_aug, hflip, seed):
+    def _load(label, idx):
         # 재현성: 병렬 스레드가 난수 생성기를 공유하지 않도록 샘플마다 독립 시드
         rng = np.random.default_rng([int(seed), int(idx), int(EPOCH["n"])])
-        img = cv2.imread(p, cv2.IMREAD_GRAYSCALE)
-        img = cv2.resize(img, (img_size, img_size), interpolation=cv2.INTER_AREA)
+        img = arr[int(idx)]                      # 캐시 원본은 수정하지 않음 (아래 연산은 모두 새 배열 반환)
         if training and degrade_aug:
             img = random_train_degrade(img, rng=rng)
         if clahe:
@@ -81,20 +100,20 @@ def make_loader(img_size, training, clahe, degrade_aug, hflip, seed):
         img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB).astype(np.float32) / 255.0
         return img, np.int32(label)
 
-    def tf_load(path, label, idx):
-        img, lab = tf.numpy_function(_load, [path, label, idx], [tf.float32, tf.int32])
+    def tf_load(label, idx):
+        img, lab = tf.numpy_function(_load, [label, idx], [tf.float32, tf.int32])
         img.set_shape((img_size, img_size, 3)); lab.set_shape(())
         return img, tf.one_hot(lab, 2)
     return tf_load
 
 
 def make_dataset(split_dir, img_size, batch, training, clahe, degrade_aug, hflip, seed, shuffle=None):
-    paths, labels = list_files(split_dir)
-    idx = np.arange(len(paths), dtype=np.int64)
-    ds = tf.data.Dataset.from_tensor_slices((paths, labels, idx))
+    arr, labels = load_split_cached(split_dir, img_size)
+    idx = np.arange(len(labels), dtype=np.int64)
+    ds = tf.data.Dataset.from_tensor_slices((labels, idx))
     if training if shuffle is None else shuffle:
-        ds = ds.shuffle(len(paths), seed=seed, reshuffle_each_iteration=True)
-    ds = ds.map(make_loader(img_size, training, clahe, degrade_aug, hflip, seed),
+        ds = ds.shuffle(len(labels), seed=seed, reshuffle_each_iteration=True)
+    ds = ds.map(make_loader(arr, img_size, training, clahe, degrade_aug, hflip, seed),
                 num_parallel_calls=tf.data.AUTOTUNE, deterministic=True)
     return ds.batch(batch).prefetch(tf.data.AUTOTUNE), labels
 
@@ -249,7 +268,7 @@ def main():
 
     model.compile(optimizer=keras.optimizers.Adam(learning_rate=a.lr),
                   loss="categorical_crossentropy",
-                  metrics=["accuracy", keras.metrics.AUC(name="auc")])
+                  metrics=["accuracy"])
 
     cw = None
     if not a.no_class_weight:
