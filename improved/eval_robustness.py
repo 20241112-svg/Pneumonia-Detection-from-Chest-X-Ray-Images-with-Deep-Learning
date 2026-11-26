@@ -28,7 +28,7 @@ def list_files(split_dir):
     for i, c in enumerate(CLASSES):
         d = os.path.join(split_dir, c)
         for f in sorted(os.listdir(d)):
-            if f.lower().endswith((".jpeg", ".jpg", ".png")):
+            if f.lower().endswith((".jpeg", ".jpg", ".png")) and not f.startswith("._"):   # macOS 리소스 파일 제외
                 paths.append(os.path.join(d, f)); labels.append(i)
     return paths, np.array(labels)
 

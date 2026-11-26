@@ -58,6 +58,8 @@ def main():
         print(f"  {label:<14} ← {a.runs}/{tag}/best.keras  (파라미터 {m.count_params():,}개, CLAHE={clahe}, 입력 {size}px)")
     size = next(iter(models.values()))[2]
 
+    if "__MACOSX" in a.data:
+        raise SystemExit("[중단] --data 가 __MACOSX 폴더입니다(영상이 아닌 macOS 리소스 파일). 실제 chest_xray 폴더를 지정하세요.")
     paths, y = list_files(os.path.join(a.data, "test"))
     imgs = load_gray(paths, size)
     print(f"  test 영상 {len(y)}장 (NORMAL {int((y == 0).sum())}, PNEUMONIA {int((y == 1).sum())})")
