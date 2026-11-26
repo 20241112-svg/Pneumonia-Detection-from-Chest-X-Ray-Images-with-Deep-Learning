@@ -133,6 +133,7 @@ def main():
     ap.add_argument("--drive", default="/content/drive/MyDrive/pneumonia_robustness")
     ap.add_argument("--stages", default="v1,vit,cnn,seeds,orig")
     ap.add_argument("--quick", action="store_true", help="(개발용) 1 epoch, ViT 사전학습 없이 — 파이프라인 동작 확인")
+    ap.add_argument("--single-seeds", default="0", help="single 단계에서 돌릴 seed 목록 (예: 0,1,2)")
     ap.add_argument("--allow-cpu", action="store_true", help="GPU 가 없어도 학습 진행 (모델 1개에 1.5~2.5시간)")
     a = ap.parse_args()
     stages = [s.strip() for s in a.stages.split(",") if s.strip()]
@@ -201,9 +202,10 @@ def main():
                                                                "--data", D, "--tag", f"{nt}_s{seed}"]), a.drive)
 
     if "single" in stages:
-        for tag, flags in [("clahe_v2", ["--bn", "--clahe"]), ("aug_v2", ["--bn", "--degrade-aug"])]:
-            step(f"v2 CNN {tag} (seed 0)", [summary_json(tag, 0), f"results/{tag}_s0_probs.npz"],
-                 lambda tag=tag, flags=flags: train_eval_cnn(D, tag, 0, flags, Q), a.drive)
+        for seed in [int(x) for x in a.single_seeds.split(",") if x.strip()]:
+            for tag, flags in [("aug_v2", ["--bn", "--degrade-aug"]), ("clahe_v2", ["--bn", "--clahe"])]:
+                step(f"v2 CNN {tag} (seed {seed})", [summary_json(tag, seed), f"results/{tag}_s{seed}_probs.npz"],
+                     lambda tag=tag, flags=flags, seed=seed: train_eval_cnn(D, tag, seed, flags, Q), a.drive)
 
     aggregate()
     save_to_drive(a.drive)
