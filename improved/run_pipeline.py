@@ -131,8 +131,16 @@ def main():
     ap.add_argument("--drive", default="/content/drive/MyDrive/pneumonia_robustness")
     ap.add_argument("--stages", default="v1,vit,cnn,seeds,orig")
     ap.add_argument("--quick", action="store_true", help="(개발용) 1 epoch, ViT 사전학습 없이 — 파이프라인 동작 확인")
+    ap.add_argument("--allow-cpu", action="store_true", help="GPU 가 없어도 학습 진행 (모델 1개에 1.5~2.5시간)")
     a = ap.parse_args()
     stages = [s.strip() for s in a.stages.split(",") if s.strip()]
+    # GPU 확인: CPU 런타임이면 에포크당 7분(GPU 는 10초대)이라 밤새 돌아간다. 학습 단계가 있으면 바로 멈춘다.
+    trains = {"vit", "cnn", "seeds", "orig", "vitseeds"} & set(stages)
+    has_gpu = subprocess.run("nvidia-smi -L", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    if trains and not has_gpu and not (a.allow_cpu or a.quick):
+        raise SystemExit("\n[중단] GPU 가 없습니다 (CPU 런타임).\n"
+                         "  런타임 → 런타임 유형 변경 → T4 GPU 로 바꾼 뒤 0·1·2·3번 셀을 다시 실행하고 이 셀을 다시 돌리세요.\n"
+                         "  GPU 를 못 받는 상황이면: 요약표만 보려면 --stages none, CPU 로라도 돌리려면 --allow-cpu")
     os.makedirs("runs", exist_ok=True); os.makedirs("results", exist_ok=True)
     D, Q = a.data, a.quick
     t_all = time.time()
