@@ -16,6 +16,7 @@
 | 열화 벤치마크 | 노이즈·블러·대비·JPEG·모션블러 × 강도 5단계 (`degrade.py`). JPEG·모션블러는 **홀드아웃**(학습에 미사용) |
 | 개선 플래그 | `--clahe` 전처리, `--degrade-aug` 열화 증강, `--backbone efficientnetb0/resnet50` 전이학습 |
 | 구조 변경 (LoRA ViT) | `train_lora_vit.py` — ImageNet 사전학습 ViT-S/16 을 고정하고 **LoRA 어댑터(약 60만 파라미터, 2.7%)** 만 학습. `--mode head`(linear probe) / `full`(전체 미세조정) 비교군 포함. 같은 분할·열화·CSV 형식 사용 |
+| 시연 | `demo.py` — 학습된 두 모델을 불러와 열화 예시, 예측 비교, test 정확도를 한 번에 출력 |
 | 평가 | 깨끗한 test + 25개 열화 조건에서 accuracy/F1/AUC/클래스별 recall → CSV + 곡선 (`eval_robustness.py`) |
 
 ## 실행
