@@ -111,6 +111,67 @@ assert set(TRAIN_CORRUPTIONS) | set(HOLDOUT_CORRUPTIONS) == set(CORRUPTIONS)
 assert not set(TRAIN_CORRUPTIONS) & set(HOLDOUT_CORRUPTIONS)
 
 
+# ---------------------------------------------------------------------------
+# 추가 평가 전용 열화 (2026-11-26) — 학습 증강에는 절대 쓰지 않는다.
+# "처음 보는 열화" 를 2종(JPEG·모션블러)에서 7종으로 늘려 일반화를 더 넓게 본다.
+# 종류와 강도 값은 ImageNet-C (Hendrycks & Dietterich, ICLR 2019) 의 정의를 따르되
+# 150px 입력에 맞춰 블러 반경만 줄였다. CORRUPTIONS 레지스트리와는 분리 → 기존 평가 결과는 그대로.
+# ---------------------------------------------------------------------------
+_SPECKLE_SIGMA = [0, 0.15, 0.20, 0.35, 0.45, 0.60]   # 곱셈 노이즈 표준편차 (ImageNet-C 값)
+_SHOT_C        = [0, 60, 25, 12, 5, 3]               # 포아송 노이즈 광자 수 스케일 (ImageNet-C 값, 작을수록 강함)
+_DEFOCUS_R     = [0, 1.0, 1.5, 2.5, 3.5, 5.0]        # 초점 흐림 원판 반경 (px)
+_PIXELATE_F    = [1.0, 0.6, 0.5, 0.4, 0.3, 0.25]     # 해상도 축소 비율 (ImageNet-C 값)
+_BRIGHT_ADD    = [0, 0.1, 0.2, 0.3, 0.4, 0.5]        # 밝기 증가량 (0~1 스케일, ImageNet-C 값) — 과다 노출
+
+
+def speckle_noise(img, s, rng=None):
+    """신호에 비례하는 곱셈 노이즈 (밝은 곳일수록 노이즈가 큼)."""
+    rng = _rng(rng)
+    x = _to_float(img) / 255.0
+    return _to_uint8((x + x * rng.normal(0.0, _SPECKLE_SIGMA[s], size=x.shape)) * 255.0)
+
+
+def shot_noise(img, s, rng=None):
+    """포아송(광자 수) 노이즈 — 저선량 X-ray 양자 노이즈의 물리적 모델에 더 가깝다."""
+    rng = _rng(rng)
+    x = _to_float(img) / 255.0
+    return _to_uint8(rng.poisson(x * _SHOT_C[s]) / float(_SHOT_C[s]) * 255.0)
+
+
+def defocus_blur(img, s, rng=None):
+    """원판 커널 블러 (초점이 맞지 않은 영상)."""
+    r = _DEFOCUS_R[s]; n = int(np.ceil(r)) * 2 + 1
+    yy, xx = np.mgrid[:n, :n] - n // 2
+    k = (xx ** 2 + yy ** 2 <= r ** 2).astype(np.float32)
+    return _to_uint8(cv2.filter2D(_to_float(img), -1, k / k.sum(), borderType=cv2.BORDER_REFLECT))
+
+
+def pixelate(img, s, rng=None):
+    """해상도를 낮췄다가 다시 키움 (저해상도 저장·전송)."""
+    h, w = img.shape[:2]; f = _PIXELATE_F[s]
+    small = cv2.resize(img, (max(1, int(w * f)), max(1, int(h * f))), interpolation=cv2.INTER_AREA)
+    return cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
+
+
+def brightness(img, s, rng=None):
+    """전체를 밝게 (과다 노출). 학습에 쓴 contrast 열화는 어둡게 만드는 방향이라 반대다."""
+    return _to_uint8(_to_float(img) + _BRIGHT_ADD[s] * 255.0)
+
+
+EXTRA_CORRUPTIONS = {
+    "speckle_noise": speckle_noise,
+    "shot_noise":    shot_noise,
+    "defocus_blur":  defocus_blur,
+    "pixelate":      pixelate,
+    "brightness":    brightness,
+}
+assert not set(EXTRA_CORRUPTIONS) & set(CORRUPTIONS)
+
+
+def degrade_extra(img, name, severity, rng=None):
+    return img.copy() if severity == 0 else EXTRA_CORRUPTIONS[name](img, severity, rng=rng)
+
+
 def degrade(img, name, severity, rng=None):
     """단일 열화 적용. severity 0 → 원본 복사. rng 를 주면 노이즈·모션 각도가 결정적."""
     if severity == 0:
