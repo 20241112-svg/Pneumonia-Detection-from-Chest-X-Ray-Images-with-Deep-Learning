@@ -13,6 +13,8 @@ run_pipeline.py — 전체 실험을 순서대로 돌리는 드라이버 (끊겨
   seeds : base_v2 / both_v2, seed 1·2
   orig  : 원본 CNN 그대로(BN 없음) — 학습 실패 재현
   vitseeds : vit_lora_both seed 1·2   (--stages 에 명시했을 때만)
+  ablate : BN 재보정 '전' 모델(best_norecal.keras)을 열화 평가 → 증강 효과와 BN 재보정 효과 분리 (학습 없음, 명시했을 때만)
+  single : 2차 방식으로 CLAHE 만 / 증강만 (seed 0) → 기법별 효과를 2차 조건으로 비교 (명시했을 때만)
 
 사용 (Colab):
   !python run_pipeline.py
@@ -135,7 +137,7 @@ def main():
     a = ap.parse_args()
     stages = [s.strip() for s in a.stages.split(",") if s.strip()]
     # GPU 확인: CPU 런타임이면 에포크당 7분(GPU 는 10초대)이라 밤새 돌아간다. 학습 단계가 있으면 바로 멈춘다.
-    trains = {"vit", "cnn", "seeds", "orig", "vitseeds"} & set(stages)
+    trains = {"vit", "cnn", "seeds", "orig", "vitseeds", "single"} & set(stages)
     has_gpu = subprocess.run("nvidia-smi -L", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
     if trains and not has_gpu and not (a.allow_cpu or a.quick):
         raise SystemExit("\n[중단] GPU 가 없습니다 (CPU 런타임).\n"
@@ -186,6 +188,22 @@ def main():
         for seed in [1, 2]:
             step(f"ViT+LoRA + CLAHE + 증강 (seed {seed})", [summary_json("vit_lora_both", seed)],
                  lambda seed=seed: train_vit(D, "vit_lora_both", seed, ["--clahe", "--degrade-aug"], Q), a.drive)
+
+    if "ablate" in stages:
+        for tag, _ in CNN:
+            for seed in [0, 1, 2]:
+                model = f"runs/{tag}_s{seed}/best_norecal.keras"
+                if not os.path.exists(model):
+                    print(f"\n[건너뜀] 모델 없음: {model}"); continue
+                nt = f"{tag}_norecal"
+                step(f"BN 재보정 전 모델 평가: {tag} (seed {seed})", [summary_json(nt, seed), f"results/{nt}_s{seed}_probs.npz"],
+                     lambda model=model, nt=nt, seed=seed: sh([PY, script("eval_robustness.py"), "--model", model,
+                                                               "--data", D, "--tag", f"{nt}_s{seed}"]), a.drive)
+
+    if "single" in stages:
+        for tag, flags in [("clahe_v2", ["--bn", "--clahe"]), ("aug_v2", ["--bn", "--degrade-aug"])]:
+            step(f"v2 CNN {tag} (seed 0)", [summary_json(tag, 0), f"results/{tag}_s0_probs.npz"],
+                 lambda tag=tag, flags=flags: train_eval_cnn(D, tag, 0, flags, Q), a.drive)
 
     aggregate()
     save_to_drive(a.drive)
